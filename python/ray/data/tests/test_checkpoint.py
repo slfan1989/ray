@@ -501,6 +501,12 @@ def test_recovery_skips_checkpointed_rows(
     with pytest.raises(TestException):
         ds.write_parquet(data_output_path, filesystem=fs, concurrency=1)
 
+    # Print checkpoint contents for debugging.
+    print(
+        "checkpoint ids after failure:",
+        read_ids_from_checkpoint_files(ctx.checkpoint_config),
+    )
+
     ray.get(coordinator_actor.disable_failure.remote())
     # When executing the same dataset again, this should skip the already
     # checkpointed rows.
