@@ -100,9 +100,11 @@ class CheckpointLoader:
             files = [info for info in infos if info.type == pyarrow.fs.FileType.File]
             file_count = len(files)
             total_size = sum(info.size for info in files if info.size is not None)
-        except Exception:
+        except Exception as e:
             logger.debug(
-                "Checkpoint pre-list failed for path=%s", checkpoint_path_unwrapped
+                "Checkpoint pre-list failed for path=%s: %s",
+                checkpoint_path_unwrapped,
+                e,
             )
 
         # Load the checkpoint data
