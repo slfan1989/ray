@@ -85,18 +85,22 @@ class BatchBasedCheckpointWriter(CheckpointWriter):
             )
 
         start_t = time.time()
+        succeeded = False
         try:
-            return call_with_retry(
+            result = call_with_retry(
                 _write,
                 description=f"Write checkpoint file: {file_name}",
                 match=DataContext.get_current().retried_io_errors,
             )
+            succeeded = True
+            return result
         except Exception:
             logger.exception(f"Checkpoint write failed: {file_name}")
             raise
         finally:
             logger.info(
-                "Checkpoint write: file=%s rows=%d path=%s elapsed_s=%.3f",
+                "Checkpoint write %s: file=%s rows=%d path=%s elapsed_s=%.3f",
+                "succeeded" if succeeded else "failed",
                 file_name,
                 num_rows,
                 ckpt_file_path,
