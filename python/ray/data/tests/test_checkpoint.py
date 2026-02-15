@@ -496,7 +496,7 @@ def test_recovery_skips_checkpointed_rows(
         FailActor,
         fn_constructor_args=[coordinator_actor, max_num_items, ctx.checkpoint_config],
         concurrency=1,
-        batch_size=None,
+        batch_size=1,  # Ensure early rows checkpoint before failure at id=2.
         num_cpus=1.1,  # Use a different num_cpus to avoid operator fusion.
     )
 
@@ -525,12 +525,9 @@ def test_recovery_skips_checkpointed_rows(
     # Disable checkpointing prior to reading back the data, so we don't skip any rows.
     ctx.checkpoint_config = None
 
-    if len(checkpoint_ids_after_failure) == 0:
-        # Skip due to race condition: checkpoint may not be written if failure
-        # happens before the Write task reaches checkpoint writing.
-        pytest.skip(
-            "Checkpoint not visible after failure; skipping flaky recovery test"
-        )
+    assert (
+        len(checkpoint_ids_after_failure) > 0
+    ), "Checkpoint should be written before failure"
 
     # Ensure that the written data is correct.
     ds_readback = ray.data.read_parquet(data_output_path, filesystem=fs)
