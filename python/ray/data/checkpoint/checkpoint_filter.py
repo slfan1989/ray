@@ -90,23 +90,6 @@ class CheckpointLoader:
         start_t = time.time()
         checkpoint_path_unwrapped = _unwrap_protocol(self.checkpoint_path)
 
-        file_count = None
-        total_size = None
-        try:
-            selector = pyarrow.fs.FileSelector(
-                checkpoint_path_unwrapped, recursive=True
-            )
-            infos = self.filesystem.get_file_info(selector)
-            files = [info for info in infos if info.type == pyarrow.fs.FileType.File]
-            file_count = len(files)
-            total_size = sum(info.size for info in files if info.size is not None)
-        except Exception as e:
-            logger.debug(
-                "Checkpoint pre-list failed for path=%s: %s",
-                checkpoint_path_unwrapped,
-                e,
-            )
-
         # Load the checkpoint data
         checkpoint_ds: ray.data.Dataset = ray.data.read_parquet(
             self.checkpoint_path,
@@ -142,22 +125,18 @@ class CheckpointLoader:
         self._validate_loaded_checkpoint(schema, metadata)
 
         logger.info(
-            "Checkpoint loaded for %s in %.2f seconds. SizeBytes=%d Rows=%d Files=%s TotalBytes=%s Schema=%s",
+            "Checkpoint loaded for %s in %.2f seconds. SizeBytes=%d Rows=%d Schema=%s",
             type(self).__name__,
             time.time() - start_t,
             metadata.size_bytes,
             metadata.num_rows,
-            file_count,
-            total_size,
             schema.to_string(),
         )
 
         if metadata.num_rows == 0:
             logger.warning(
-                "Checkpoint loaded empty: path=%s files=%s total_bytes=%s",
+                "Checkpoint loaded empty: path=%s",
                 checkpoint_path_unwrapped,
-                file_count,
-                total_size,
             )
 
         return checkpoint_block_ref
