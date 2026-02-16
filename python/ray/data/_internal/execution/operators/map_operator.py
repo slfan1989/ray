@@ -59,6 +59,7 @@ from ray.data._internal.execution.operators.map_transformer import (
     MapTransformer,
 )
 from ray.data._internal.execution.util import memory_string
+from ray.data._internal.logical.operators.read_operator import Read
 from ray.data._internal.stats import StatsDict
 from ray.data._internal.util import MemoryProfiler
 from ray.data.block import (
@@ -476,17 +477,57 @@ class MapOperator(InternalQueueOperatorMixin, OneToOneOperator, ABC):
         # Apply additional block split if needed.
         if self.get_additional_split_factor() > 1:
             split_factor = self.get_additional_split_factor()
-            split_transformer = MapTransformer(
-                [
-                    BlockMapTransformFn(
-                        lambda blocks, ctx: _split_blocks(blocks, split_factor),
-                        # NOTE: Disable block-shaping to avoid it overriding
-                        #       splitting
-                        disable_block_shaping=True,
-                    )
-                ]
+            # Prefer folding the split into block shaping when possible to avoid
+            # splitting already-shaped blocks again.
+            folded_split = False
+            # Only fold for non-Read ops; Read uses split to enforce override_num_blocks.
+            is_read_op = any(
+                isinstance(logical_op, Read)
+                for logical_op in getattr(self, "_logical_operators", [])
             )
-            map_transformer = map_transformer.fuse(split_transformer)
+            if not is_read_op:
+                target_max_block_size_override = self.target_max_block_size_override
+                if target_max_block_size_override is not None:
+                    # Apply split via the override so runtime override doesn't undo it.
+                    effective_target_max_block_size = max(
+                        1, target_max_block_size_override // split_factor
+                    )
+                    self.override_target_max_block_size(effective_target_max_block_size)
+                    folded_split = True
+                else:
+                    # Fall back to updating the only shaping fn when there is no override.
+                    target_fns = [
+                        fn
+                        for fn in map_transformer.get_transform_fns()
+                        if fn.target_max_block_size is not None
+                        and fn.target_num_rows_per_block is None
+                        and not getattr(
+                            fn.output_block_size_option, "disable_block_shaping", False
+                        )
+                    ]
+                    if len(target_fns) == 1:
+                        target_fn = target_fns[0]
+                        effective_target_max_block_size = max(
+                            1, target_fn.target_max_block_size // split_factor
+                        )
+                        target_fn.override_target_max_block_size(
+                            effective_target_max_block_size
+                        )
+                        folded_split = True
+
+            if not folded_split:
+                # If we can't fold the split into shaping, append a split transform.
+                split_transformer = MapTransformer(
+                    [
+                        BlockMapTransformFn(
+                            lambda blocks, ctx: _split_blocks(blocks, split_factor),
+                            # NOTE: Disable block-shaping to avoid it overriding
+                            #       splitting
+                            disable_block_shaping=True,
+                        )
+                    ]
+                )
+                map_transformer = map_transformer.fuse(split_transformer)
 
         # Store the potentially modified map_transformer for later use
         self._map_transformer = map_transformer

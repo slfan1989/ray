@@ -9,8 +9,13 @@ import ray
 
 if TYPE_CHECKING:
     from ray.data.context import DataContext
+from ray.data._internal.execution.interfaces import ExecutionOptions
 from ray.data._internal.execution.operators.input_data_buffer import InputDataBuffer
 from ray.data._internal.execution.operators.map_operator import MapOperator
+from ray.data._internal.execution.operators.map_transformer import (
+    BlockMapTransformFn,
+    MapTransformer,
+)
 from ray.data._internal.execution.operators.task_pool_map_operator import (
     TaskPoolMapOperator,
 )
@@ -27,6 +32,7 @@ from ray.data._internal.logical.operators import (
     Project,
 )
 from ray.data._internal.logical.optimizers import PhysicalOptimizer
+from ray.data._internal.output_buffer import OutputBlockSizeOption
 from ray.data._internal.planner import create_planner
 from ray.data.block import BlockMetadata
 from ray.data.context import DataContext
@@ -114,6 +120,64 @@ def test_split_blocks_operator(ray_start_regular_shared_2_cpus):
     up_physical_op = physical_op.input_dependencies[0]
     assert isinstance(up_physical_op, MapOperator)
     assert up_physical_op.name == "ReadParquet->SplitBlocks(10)"
+
+
+def test_split_blocks_folded_into_shaping(ray_start_regular_shared_2_cpus):
+    ctx = DataContext.get_current()
+    input_op = InputDataBuffer(ctx, input_data=[])
+
+    def identity(blocks, _):
+        yield from blocks
+
+    map_transformer = MapTransformer(
+        [
+            BlockMapTransformFn(
+                identity,
+                output_block_size_option=OutputBlockSizeOption.of(
+                    target_max_block_size=100
+                ),
+            )
+        ]
+    )
+    op = MapOperator.create(map_transformer, input_op, ctx, name="TestMap")
+    op.set_additional_split_factor(2)
+
+    op.start(ExecutionOptions())
+
+    transform_fns = op.get_map_transformer().get_transform_fns()
+    assert len(transform_fns) == 1
+    assert transform_fns[0].target_max_block_size == 50
+
+
+def test_split_blocks_folded_with_override(ray_start_regular_shared_2_cpus):
+    ctx = DataContext.get_current()
+    input_op = InputDataBuffer(ctx, input_data=[])
+
+    def identity(blocks, _):
+        yield from blocks
+
+    map_transformer = MapTransformer(
+        [
+            BlockMapTransformFn(
+                identity,
+                output_block_size_option=OutputBlockSizeOption.of(
+                    target_max_block_size=100
+                ),
+            )
+        ]
+    )
+    op = MapOperator.create(
+        map_transformer,
+        input_op,
+        ctx,
+        name="TestMapOverride",
+        target_max_block_size_override=80,
+    )
+    op.set_additional_split_factor(2)
+
+    op.start(ExecutionOptions())
+
+    assert op.target_max_block_size_override == 40
 
 
 def test_from_operators(ray_start_regular_shared_2_cpus):
