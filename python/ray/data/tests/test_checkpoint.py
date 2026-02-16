@@ -128,14 +128,21 @@ def _get_batch_based_files(ckpt_path: str, fs) -> List[str]:
 
 
 def _read_batch_file_ids(file_paths: List[str], id_column: str, fs) -> List[int]:
-    """Read IDs from batch-based checkpoint files."""
+    """Read IDs from batch-based checkpoint files.
+
+    Checkpoint files may be concurrently written; tolerate transient read errors.
+    """
     ids = []
     for file_path in file_paths:
-        if fs is None:
-            table = pa.parquet.read_table(file_path)
-        else:
-            with fs.open_input_file(file_path) as f:
-                table = pa.parquet.read_table(f)
+        try:
+            if fs is None:
+                table = pa.parquet.read_table(file_path)
+            else:
+                with fs.open_input_file(file_path) as f:
+                    table = pa.parquet.read_table(f)
+        except (pa.ArrowInvalid, OSError, EOFError, ValueError) as exc:
+            logger.debug("Skip unreadable checkpoint file %s: %s", file_path, exc)
+            continue
         df = table.to_pandas()
         ids.extend(df[id_column].tolist())
     return ids
@@ -157,30 +164,45 @@ def read_ids_from_checkpoint_files(config: CheckpointConfig) -> List[Union[int, 
         raise ValueError(f"Invalid backend: {config.backend}")
 
 
+# Output parquet files may be visible before writers finish, so tolerate
+# transient read/metadata errors during polling.
 def _count_output_rows(output_path: str, fs) -> int:
     """Count total rows in written parquet output files."""
     try:
         unwrapped = _unwrap_protocol(output_path)
-        selector = FileSelector(unwrapped, recursive=True)
-        infos = fs.get_file_info(selector)
+        if fs is None:
+            if not os.path.exists(unwrapped):
+                return 0
+            parquet_files = []
+            for root, _, files in os.walk(unwrapped):
+                for name in files:
+                    if name.endswith(".parquet"):
+                        parquet_files.append(os.path.join(root, name))
+        else:
+            selector = FileSelector(unwrapped, recursive=True)
+            infos = fs.get_file_info(selector)
+            parquet_files = [
+                info.path
+                for info in infos
+                if info.type == pa.fs.FileType.File and info.path.endswith(".parquet")
+            ]
     except Exception:
         return 0
 
-    parquet_files = [
-        info.path
-        for info in infos
-        if info.type == pa.fs.FileType.File and info.path.endswith(".parquet")
-    ]
     if not parquet_files:
         return 0
 
     total_rows = 0
     for path in parquet_files:
-        if fs is None:
-            pf = pq.ParquetFile(path)
-        else:
-            pf = pq.ParquetFile(path, filesystem=fs)
-        total_rows += pf.metadata.num_rows
+        try:
+            if fs is None:
+                pf = pq.ParquetFile(path)
+            else:
+                pf = pq.ParquetFile(path, filesystem=fs)
+            total_rows += pf.metadata.num_rows
+        except (pa.ArrowInvalid, OSError, EOFError, ValueError) as exc:
+            logger.debug("Skip unreadable output parquet file %s: %s", path, exc)
+            continue
     return total_rows
 
 
